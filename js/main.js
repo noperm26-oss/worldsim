@@ -1,9 +1,15 @@
-// main.js — scene, camera, painting, UI.
+// main.js — scene, input routing, the simulation clock, and wiring to the UI.
 
 import * as THREE from 'three';
-import { WorldState, PRESETS, pointToUV, SEA_BYTE } from './worldstate.js';
+import { WorldState, pointToUV } from './worldstate.js';
 import { buildPlanet } from './planet.js';
-import { BIOMES, biomeIndex, biomeAt } from './biomes.js';
+import { Entities, surfacePoint } from './render-entities.js';
+import { Simulation } from './sim.js';
+import { POWER_BY_ID, grantTrait, giveCommandment, sealCovenant } from './faith.js';
+import { createUI } from './ui.js';
+import { saveLocal, loadLocal, exportFile, importFile, clearLocal } from './save.js';
+import { ERAS, formatYear } from './eras.js';
+import { biomeAt, SEA_BYTE } from './biomes.js';
 
 // ---------------------------------------------------------------- renderer
 
@@ -15,138 +21,128 @@ stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070d);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.005, 400);
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 400);
+// Entities use Lambert shading, so they need real lights. The directional light tracks
+// the same sun vector the terrain shader uses, so day and night agree everywhere.
+const sunLight = new THREE.DirectionalLight(0xfff4e2, 2.2);
+scene.add(sunLight);
+scene.add(new THREE.AmbientLight(0x334466, 0.85));
 
-// ---------------------------------------------------------------- world
+// ---------------------------------------------------------------- world + sim
 
+const HEIGHT_SCALE = 0.14;
 const world = new WorldState(1024, 512);
-const planet = buildPlanet(world);
+const planet = buildPlanet(world, { heightScale: HEIGHT_SCALE });
 scene.add(planet.group);
 
-const sun = { angle: 0.6 };
-const sunDir = new THREE.Vector3();
+const sim = new Simulation(world, 1337);
+const entities = new Entities(world, { heightScale: HEIGHT_SCALE });
+scene.add(entities.group);
 
-// ---------------------------------------------------------------- orbit camera
+const state = {
+  tool: 'paint',
+  biome: 4,
+  powerId: 'spawnHumans',
+  brush: 26,
+  speed: 1,
+  cultureId: null,
+  painting: false,
+  orbiting: false,
+  lastX: 0, lastY: 0,
+};
 
-const cam = { theta: 0.6, phi: 1.15, dist: 3.1, target: new THREE.Vector3(0, 0, 0) };
+// ---------------------------------------------------------------- camera
+
+const cam = { theta: 0.6, phi: 1.15, dist: 3.1 };
+const target = new THREE.Vector3();
 
 function applyCamera() {
   const s = Math.sin(cam.phi);
   camera.position.set(
-    cam.target.x + cam.dist * s * Math.cos(cam.theta),
-    cam.target.y + cam.dist * Math.cos(cam.phi),
-    cam.target.z + cam.dist * s * Math.sin(cam.theta)
+    cam.dist * s * Math.cos(cam.theta),
+    cam.dist * Math.cos(cam.phi),
+    cam.dist * s * Math.sin(cam.theta)
   );
-  camera.lookAt(cam.target);
+  camera.lookAt(target);
   planet.setCamPos(camera.position);
+  sunLight.position.copy(sunDir).multiplyScalar(10);
 }
 
-// ---------------------------------------------------------------- ray -> sphere
+const sunDir = new THREE.Vector3();
+
+// ---------------------------------------------------------------- picking
 
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-const hitPoint = new THREE.Vector3();
+const hit = new THREE.Vector3();
+const PROBE = [1 + HEIGHT_SCALE * 0.9, 1 + HEIGHT_SCALE * 0.5, 1 + HEIGHT_SCALE * 0.15, 1];
 
-// Terrain is displaced on the GPU, so the CPU has no exact surface. Probe a few radii
-// from the tallest terrain down to sea level and take the first hit — closest wins.
-const PROBE_RADII = [1.10, 1.06, 1.03, 1.0];
-
-function pickSphere(clientX, clientY) {
+function pick(clientX, clientY) {
   const r = renderer.domElement.getBoundingClientRect();
   ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
   ndc.y = -((clientY - r.top) / r.height) * 2 + 1;
   raycaster.setFromCamera(ndc, camera);
-
-  const o = raycaster.ray.origin;
-  const d = raycaster.ray.direction;
-  for (const R of PROBE_RADII) {
+  const o = raycaster.ray.origin, d = raycaster.ray.direction;
+  for (const R of PROBE) {
     const b = 2 * (o.x * d.x + o.y * d.y + o.z * d.z);
     const c = o.lengthSq() - R * R;
     const disc = b * b - 4 * c;
     if (disc < 0) continue;
     const t = (-b - Math.sqrt(disc)) / 2;
     if (t <= 0) continue;
-    hitPoint.copy(d).multiplyScalar(t).add(o);
-    return hitPoint.normalize();
+    return hit.copy(d).multiplyScalar(t).add(o).normalize();
   }
   return null;
 }
 
-// ---------------------------------------------------------------- state
-
-const ui = {
-  biome: biomeIndex('grassland'),
-  brush: 26,
-  mode: 'paint',
-  painting: false,
-  orbiting: false,
-  lastX: 0,
-  lastY: 0,
-};
-
-function paintAt(clientX, clientY) {
-  const p = pickSphere(clientX, clientY);
-  if (!p) return;
-  const [u, v] = pointToUV(p);
-  if (world.paint(u, v, ui.brush, ui.biome, 0.55)) world.dirty();
+function nearestSettlement(u, v, maxD2 = 0.0025) {
+  let best = null, bd = maxD2;
+  for (const s of sim.settlements) {
+    let dx = s.u - u; if (dx > 0.5) dx -= 1; else if (dx < -0.5) dx += 1;
+    const d = dx * dx + (s.v - v) * (s.v - v);
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------- input
 
 const el = renderer.domElement;
-
 el.addEventListener('contextmenu', (e) => e.preventDefault());
 
 el.addEventListener('pointerdown', (e) => {
   el.setPointerCapture(e.pointerId);
-  ui.lastX = e.clientX;
-  ui.lastY = e.clientY;
-
-  const wantsPaint = e.button === 0 && ui.mode === 'paint';
-  if (wantsPaint) {
-    ui.painting = true;
-    paintAt(e.clientX, e.clientY);
+  state.lastX = e.clientX; state.lastY = e.clientY;
+  if (e.button === 0 && (state.tool === 'paint' || state.tool === 'power' || state.tool === 'inspect')) {
+    state.painting = true;
+    act(e.clientX, e.clientY);
   } else {
-    ui.orbiting = true;
+    state.orbiting = true;
   }
 });
 
 el.addEventListener('pointermove', (e) => {
-  if (ui.painting) {
-    paintAt(e.clientX, e.clientY);
-    updateReadout(e.clientX, e.clientY);
-    return;
-  }
-  if (ui.orbiting) {
-    const dx = e.clientX - ui.lastX;
-    const dy = e.clientY - ui.lastY;
-    ui.lastX = e.clientX;
-    ui.lastY = e.clientY;
-    cam.theta -= dx * 0.005;
-    cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, cam.phi - dy * 0.005));
+  if (state.painting && state.tool === 'paint') { act(e.clientX, e.clientY); }
+  else if (state.orbiting) {
+    cam.theta -= (e.clientX - state.lastX) * 0.005;
+    cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, cam.phi - (e.clientY - state.lastY) * 0.005));
     applyCamera();
-    return;
   }
-  updateReadout(e.clientX, e.clientY);
+  state.lastX = e.clientX; state.lastY = e.clientY;
+  hover(e.clientX, e.clientY);
 });
 
 function endPointer(e) {
-  if (ui.painting) {
-    ui.painting = false;
-    refreshLand();
-  }
-  ui.orbiting = false;
-  if (e && e.pointerId != null && el.hasPointerCapture(e.pointerId)) {
-    el.releasePointerCapture(e.pointerId);
-  }
+  state.painting = false; state.orbiting = false;
+  if (e && e.pointerId != null && el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
 }
 el.addEventListener('pointerup', endPointer);
 el.addEventListener('pointercancel', endPointer);
 
 el.addEventListener('wheel', (e) => {
   e.preventDefault();
-  cam.dist = Math.max(1.25, Math.min(12, cam.dist * Math.exp(e.deltaY * 0.0011)));
+  cam.dist = Math.max(1.22, Math.min(12, cam.dist * Math.exp(e.deltaY * 0.0011)));
   applyCamera();
 }, { passive: false });
 
@@ -156,131 +152,160 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// ---------------------------------------------------------------- readout
+// ---------------------------------------------------------------- actions
 
-const rBiome = document.getElementById('r-biome');
-const rElev = document.getElementById('r-elev');
-const rLand = document.getElementById('r-land');
-const rFps = document.getElementById('r-fps');
+function act(cx, cy) {
+  const p = pick(cx, cy);
+  if (!p) return;
+  const [u, v] = pointToUV(p);
 
-function updateReadout(cx, cy) {
-  const p = pickSphere(cx, cy);
-  if (!p) { rBiome.textContent = '—'; rElev.textContent = '—'; return; }
+  if (state.tool === 'paint') {
+    if (world.paint(u, v, state.brush, state.biome, 0.55)) world.dirty();
+    return;
+  }
+  if (state.tool === 'power') {
+    const pow = POWER_BY_ID[state.powerId];
+    if (!pow) return;
+    if (sim.faith < pow.cost) { ui.toast(`Not enough faith — ${pow.name} costs ${pow.cost}.`); return; }
+    if (!sim.spendFaith(pow.cost)) return;
+    pow.apply(sim, u, v);
+    return;
+  }
+  if (state.tool === 'inspect') {
+    const s = nearestSettlement(u, v);
+    if (s) { state.cultureId = s.cultureId; ui.renderPeoples(); focusSettlement(s); }
+    else ui.toast('Nothing is settled there.');
+  }
+}
+
+let hoverThrottle = 0;
+function hover(cx, cy) {
+  const now = performance.now();
+  if (now - hoverThrottle < 60) return;
+  hoverThrottle = now;
+  const p = pick(cx, cy);
+  if (!p) { ui.cursor(''); return; }
   const [u, v] = pointToUV(p);
   const s = world.sample(u, v);
   const b = biomeAt(s.biome);
-  rBiome.textContent = b.name;
-  rBiome.style.color = `rgb(${b.color.map((c) => Math.round(c * 255)).join(',')})`;
-  const metres = Math.round((s.height - SEA_BYTE) * 90);
-  rElev.textContent = `${metres >= 0 ? '+' : ''}${metres} m`;
+  const elev = Math.round((s.height - SEA_BYTE) * 90);
+  let text = `${b.name} · ${elev >= 0 ? '+' : ''}${elev} m`;
+  const near = nearestSettlement(u, v, 0.0012);
+  if (near) {
+    const c = sim.culture(near.cultureId);
+    text = `${near.name} · ${Math.round(near.pop).toLocaleString('en-US')} people · ${c ? ERAS[c.eraIndex].name : ''}`;
+  }
+  ui.cursor(text);
 }
 
-function refreshLand() {
-  let land = 0;
-  const n = world.height.length;
-  for (let i = 0; i < n; i++) if (world.height[i] > SEA_BYTE) land++;
-  rLand.textContent = ((land / n) * 100).toFixed(1) + '%';
+function focusSettlement(s) {
+  cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, s.v * Math.PI));
+  cam.theta = (s.u - 0.5) * Math.PI * 2;
+  cam.dist = 1.5;
+  applyCamera();
 }
 
 // ---------------------------------------------------------------- UI
 
-const presetsEl = document.getElementById('presets');
-PRESETS.forEach((p) => {
-  const btn = document.createElement('button');
-  btn.innerHTML = `<span class="pname">${p.name}</span><span class="pblurb">${p.blurb}</span>`;
-  btn.addEventListener('click', () => {
-    world.generate(p.id, parseInt(document.getElementById('seed').value, 10) || 1337);
-    markActive(presetsEl, btn);
-    refreshLand();
-  });
-  presetsEl.appendChild(btn);
+const ui = createUI({
+  world, sim, state,
+  actions: {
+    usePreset(id) {
+      world.generate(id, parseInt(document.getElementById('seed').value, 10) || 1337);
+      sim.settlements.length = 0;
+      sim.cultures.length = 0;
+      sim.prayers.length = 0;
+      sim._dirty();
+      sim.note(`A new world takes shape: ${id}.`);
+      document.getElementById('intro').hidden = true;
+    },
+    clearWorld() {
+      world.clearToWater();
+      sim.settlements.length = 0; sim.cultures.length = 0; sim.prayers.length = 0;
+      sim._dirty();
+      sim.note('The world is nothing but clear water again.');
+    },
+    closeIntro() { document.getElementById('intro').hidden = true; },
+    grantTrait: (cid, t) => grantTrait(sim, cid, t),
+    giveCommandment: (cid, c) => giveCommandment(sim, cid, c),
+    sealCovenant: (cid, c) => sealCovenant(sim, cid, c),
+    answerPrayer: (id) => sim.answerPrayer(id),
+    refusePrayer: (id) => sim.refusePrayer(id),
+    focusSettlement,
+    save() { return saveLocal(world, sim); },
+    load() { return loadLocal(world, sim); },
+    export() { exportFile(world, sim); },
+    import(file) { return importFile(file, world, sim); },
+    wipe() {
+      clearLocal();
+      world.clearToWater();
+      sim.settlements.length = 0; sim.cultures.length = 0; sim.prayers.length = 0;
+      sim.log.length = 0; sim.faith = 200; sim.year = ERAS[0].from;
+      sim._dirty();
+      document.getElementById('intro').hidden = false;
+    },
+  },
 });
 
-const paletteEl = document.getElementById('palette');
-const biomeInfo = document.getElementById('biome-info');
-BIOMES.forEach((b, i) => {
-  const btn = document.createElement('button');
-  btn.style.background = `rgb(${b.color.map((c) => Math.round(c * 255)).join(',')})`;
-  btn.title = b.name;
-  btn.addEventListener('click', () => selectBiome(i));
-  paletteEl.appendChild(btn);
-});
-
-function selectBiome(i) {
-  ui.biome = i;
-  markActive(paletteEl, paletteEl.children[i]);
-  const b = biomeAt(i);
-  const habitable = b.cost < 90 ? `fertility ${(b.fertility * 100) | 0}% · crossing ×${b.cost}` : 'impassable water';
-  biomeInfo.innerHTML = `<b style="color:#fff">${b.name}</b><br>${habitable}`;
-}
-
-function markActive(container, btn) {
-  for (const c of container.children) c.classList.remove('on');
-  btn.classList.add('on');
-}
-
-const brushEl = document.getElementById('brush');
-const brushVal = document.getElementById('brush-val');
-brushEl.addEventListener('input', () => {
-  ui.brush = parseInt(brushEl.value, 10);
-  brushVal.textContent = ui.brush;
-});
-
-const modeBtn = document.getElementById('mode');
-modeBtn.addEventListener('click', () => {
-  ui.mode = ui.mode === 'paint' ? 'orbit' : 'paint';
-  modeBtn.innerHTML = `mode: <b>${ui.mode}</b>`;
-  modeBtn.classList.toggle('on', ui.mode === 'orbit');
-});
-
-document.getElementById('regen').addEventListener('click', () => {
-  const on = presetsEl.querySelector('.on');
-  const idxOf = on ? [...presetsEl.children].indexOf(on) : -1;
-  const preset = idxOf >= 0 ? PRESETS[idxOf].id : 'earth';
-  world.generate(preset, parseInt(document.getElementById('seed').value, 10) || 1337);
-  refreshLand();
-});
-
-document.getElementById('clear').addEventListener('click', () => {
-  world.clearToWater();
-  for (const c of presetsEl.children) c.classList.remove('on');
-  refreshLand();
-});
-
-// Touch devices get no right button, so start them in orbit mode and let them switch.
+// Touch has no right button, so start those users in orbit mode.
 if (window.matchMedia('(pointer: coarse)').matches) {
-  ui.mode = 'orbit';
-  modeBtn.innerHTML = 'mode: <b>orbit</b>';
-  modeBtn.classList.add('on');
+  state.tool = 'orbit';
+  ui.setTool('orbit');
 }
 
 // ---------------------------------------------------------------- boot
 
-selectBiome(biomeIndex('grassland'));
 world.generate('earth', 1337);
-refreshLand();
+sim.note('A world of clear water, waiting.');
 applyCamera();
 
 // ---------------------------------------------------------------- loop
 
+// One simulated year per substep. Logistic growth at r=0.03 is unconditionally stable
+// at this step, and keeping the step large bounds the per-frame cost at high time-warp.
+// Substeps are capped hard: the simulation costs ~0.6ms per step at a few hundred
+// settlements, so an unbounded step count would eat the frame budget at high time-warp.
+// Dropping substeps slows the in-game clock on slow machines; it never stalls rendering.
+const MAX_SUBTICK = 2.0;
+const MAX_STEPS = 5;
+
 let last = performance.now();
 let fpsAcc = 0, fpsFrames = 0, fpsTimer = 0;
+let uiTimer = 0;
 
 function tick(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
 
-  sun.angle += dt * 0.045;                     // slow day cycle
-  sunDir.set(Math.cos(sun.angle), 0.28, Math.sin(sun.angle)).normalize();
+  // Day cycle — slow enough to be pleasant, fast enough to see the terminator move.
+  const sunAngle = now * 0.00004;
+  sunDir.set(Math.cos(sunAngle), 0.28, Math.sin(sunAngle)).normalize();
   planet.setSunDir(sunDir);
+  sunLight.position.copy(sunDir).multiplyScalar(10);
 
+  // Simulation, on a fixed substep, decoupled from the framerate.
+  let budget = state.speed * dt;
+  let steps = 0;
+  while (budget > 0 && steps < MAX_STEPS) {
+    const step = Math.min(MAX_SUBTICK, budget);
+    sim.tick(step);
+    budget -= step;
+    steps++;
+  }
+
+  entities.update(sim, dt, now / 1000);
   renderer.render(scene, camera);
 
-  fpsAcc += dt; fpsFrames++; fpsTimer += dt;
+  fpsAcc += dt; fpsFrames++; fpsTimer += dt; uiTimer += dt;
   if (fpsTimer > 0.5) {
-    rFps.textContent = Math.round(fpsFrames / fpsAcc);
+    document.getElementById('r-fps').textContent = Math.round(fpsFrames / fpsAcc);
     fpsAcc = 0; fpsFrames = 0; fpsTimer = 0;
   }
+  if (uiTimer > 0.2) { ui.refresh(); uiTimer = 0; }
+
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
+
+// Expose a little for debugging from the console.
+window.WORLDSIM = { world, sim, entities, state, formatYear };

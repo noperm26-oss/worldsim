@@ -1,7 +1,7 @@
 # WORLDSIM — Design Spec
 
-> **Status: v3 — milestones 1–3 built.** Planet, biomes and the six worlds are running;
-> life simulation (milestone 4 onward) is not written yet.
+> **Status: v4 — complete.** Planet, biomes, six worlds, faith, life, civilisation,
+> the full era ladder, powers and persistence are all built and tested.
 > Repo description (the only original statement of intent on GitHub):
 > *"Planet living simulation as 3D planet with NPCS"*
 
@@ -192,6 +192,47 @@ not painted instantly.
 
 ---
 
+## 5b. The era ladder
+
+Fifteen eras, gated on three things at once: the year, the people's numbers, and the
+prerequisite discoveries. A culture cannot leap to castles with forty villagers.
+
+| Era | Years | Anchored to |
+|---|---|---|
+| Wood Age | 200,000 – 70,000 BC | fire, speech, wooden tools |
+| Stone Age | 70,000 – 3,500 BC | flint, the bow, then agriculture and pottery |
+| Copper Age | 3,500 – 3,000 BC | first metal, the plough, the wheel |
+| Bronze Age | 3,000 – 1,200 BC | writing, cities, the chariot, the first states |
+| Iron Age | 1,200 – 500 BC | iron, coinage, the alphabet, cavalry |
+| Classical Age | 500 BC – 500 AD | roads, aqueducts, cut masonry, philosophy |
+| Early Medieval | 500 – 1000 | feudalism, the heavy plough, the stirrup |
+| High Medieval | 1000 – 1300 | stone castles, universities, guilds |
+| Late Medieval | 1300 – 1500 | gunpowder, banking, quarantine |
+| Renaissance | 1500 – 1650 | the press, ocean navigation, astronomy |
+| Age of Sail | 1650 – 1760 | cartography, the scientific method |
+| Industrial Age | 1760 – 1900 | steam, railways, germ theory |
+| Modern Age | 1900 – 1970 | electricity, flight, antibiotics |
+| Information Age | 1970 – 2025 | computing, the internet, genetics |
+| Space Age | 2025 → | fusion, terraforming, interplanetary travel |
+
+Each era also restyles the settlements — hut, then timber hall, then stone keep, then
+chimney and then tower — so a world's history is readable at a glance from orbit.
+
+**Calibration.** The carrying-capacity ladder behind this was tuned against the published
+world-population curve, and `npm run verify` asserts it on every run. A full
+200,000-year simulation lands at:
+
+| Year | Simulated | Real |
+|---|---|---|
+| 1 AD | 156M | ~250M |
+| 1500 | 519M | ~500M |
+| 1800 | 991M | ~1B |
+| 2025 | 5.8B | ~8.1B |
+
+Within roughly a third of the real figure across two hundred millennia, and monotonic
+throughout. Splinter peoples inherit their parent's technology — they do not rediscover
+fire — but lose the shared tongue, which is what makes them a new people.
+
 ## 6. Powers and disasters
 
 Blessings and destruction, one click each:
@@ -276,16 +317,17 @@ Time runs as **1 real second = N simulated years**, with pause and 1× / 4× / 1
 
 | # | Milestone | Deliverable | |
 |---|---|---|---|
-| 1 | The planet | Big sphere, orbit camera, day/night, ocean + atmosphere. **Deployed live.** | ✅ built |
-| 2 | Terrain & biomes | Raise land, carve ocean, paint biomes; the 18-biome palette | ✅ built |
-| 3 | Six worlds | Start screen with the six presets, all editable afterwards | ✅ built |
-| 4 | Faith & life | The two-person beginning, reproduction, animals, **prayers**, creeds | — |
-| 5 | Civilisation | Settlements, migration, discovery chain, war, commandments, covenants | — |
-| 6 | Powers | Full blessing and disaster arsenal | — |
-| 7 | Persistence | Save/load, export/import | — |
-| 8 | Late | Mortal mode, rival god, fantasy pack, polish | — |
+| 1 | The planet | Big sphere, orbit camera, day/night, ocean + atmosphere | ✅ |
+| 2 | Terrain & biomes | Raise land, carve ocean, paint the 18-biome palette | ✅ |
+| 3 | Six worlds | The six presets, all editable afterwards | ✅ |
+| 4 | Faith & life | The two-person beginning, reproduction, animals, prayers, creeds | ✅ |
+| 5 | Civilisation | Settlements, migration, language divergence, war, eras, discoveries | ✅ |
+| 6 | Powers | Full blessing and disaster arsenal | ✅ |
+| 7 | Persistence | Save/load, export/import | ✅ |
+| 8 | Late | Commandments, covenants, era ladder to the Space Age | ✅ |
+| — | Mortal mode, rival god, fantasy pack | Specced, not built | ✗ |
 
-Milestones 1–3 give you a playable planet live on GitHub Pages. 4–8 are the full game.
+Everything except the three items in the last row is built. Those remain specced only.
 
 ### Running it
 

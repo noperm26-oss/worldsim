@@ -1,0 +1,10 @@
+{
+  "name": "worldsim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Planet living simulation as a 3D planet with NPCs",
+  "scripts": {
+    "verify": "node tools/verify.mjs"
+  }
+}
